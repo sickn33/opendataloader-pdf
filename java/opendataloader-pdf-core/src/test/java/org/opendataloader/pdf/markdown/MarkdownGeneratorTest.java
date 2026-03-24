@@ -15,9 +15,25 @@
  */
 package org.opendataloader.pdf.markdown;
 
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.opendataloader.pdf.api.Config;
+import org.verapdf.wcag.algorithms.entities.IObject;
+import org.verapdf.wcag.algorithms.entities.SemanticHeading;
+import org.verapdf.wcag.algorithms.entities.SemanticParagraph;
+import org.verapdf.wcag.algorithms.entities.content.TextColumn;
+import org.verapdf.wcag.algorithms.entities.content.TextChunk;
+import org.verapdf.wcag.algorithms.entities.content.TextLine;
+import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
+import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -30,6 +46,14 @@ import static org.junit.jupiter.api.Assertions.*;
  * - Levels < 1 are normalized to 1
  */
 public class MarkdownGeneratorTest {
+
+    @TempDir
+    Path tempDir;
+
+    @BeforeAll
+    static void initStaticContainers() {
+        StaticContainers.updateContainers(null);
+    }
 
     /**
      * Tests that heading levels 1-6 produce the correct number of # symbols.
@@ -87,6 +111,36 @@ public class MarkdownGeneratorTest {
         assertEquals("# ", generateHeadingPrefix(-1));
     }
 
+    @Test
+    void testCalprotectinaParagraphIsRenderedAsStructuredBlock() throws IOException {
+        SemanticParagraph paragraph = createParagraph(
+            "Calprotectina Feci 102.9 mg/Kg Adulti Normale < 50 Borderline 50 - 100 Positivo > 100 " +
+                "Neonati Moderato positivo > 350 Positivo > 650");
+
+        String markdown = generateMarkdownForParagraph(paragraph);
+
+        assertTrue(markdown.contains("**Calprotectina**"));
+        assertTrue(markdown.contains("| Matrice | Risultato | U.Misura |"));
+        assertTrue(markdown.contains("| Feci | 102.9 | mg/Kg |"));
+        assertTrue(markdown.contains("| Adulti | Normale | < 50 |"));
+        assertTrue(markdown.contains("| Adulti | Borderline | 50 - 100 |"));
+        assertTrue(markdown.contains("| Neonati | Moderato positivo | > 350 |"));
+        assertTrue(markdown.contains("| Neonati | Positivo | > 650 |"));
+    }
+
+    @Test
+    void testNoiseOnlyParagraphIsSuppressed() throws IOException {
+        assertEquals("", generateMarkdownForObject(createParagraph(".")));
+        assertEquals("", generateMarkdownForObject(createParagraph(". .")));
+        assertEquals("", generateMarkdownForObject(createParagraph("____________")));
+    }
+
+    @Test
+    void testHeadingNoiseIsSuppressedAndTrailingDotIsTrimmed() throws IOException {
+        assertEquals("", generateMarkdownForObject(createHeading(".", 5)));
+        assertEquals("##### Commento", generateMarkdownForObject(createHeading("Commento .", 5)));
+    }
+
     /**
      * Helper method that mirrors the heading prefix generation logic in
      * MarkdownGenerator.writeHeading().
@@ -104,5 +158,37 @@ public class MarkdownGeneratorTest {
         }
         sb.append(MarkdownSyntax.SPACE);
         return sb.toString();
+    }
+
+    private String generateMarkdownForParagraph(SemanticParagraph paragraph) throws IOException {
+        return generateMarkdownForObject(paragraph);
+    }
+
+    private String generateMarkdownForObject(IObject object) throws IOException {
+        File dummyPdf = tempDir.resolve("paragraph-" + System.nanoTime() + ".pdf").toFile();
+        Files.createFile(dummyPdf.toPath());
+        Config config = new Config();
+        config.setOutputFolder(tempDir.toString());
+        config.setGenerateMarkdown(true);
+
+        try (MarkdownGenerator generator = new MarkdownGenerator(dummyPdf, config)) {
+            generator.write(object);
+        }
+
+        String markdownFileName = dummyPdf.getName().replace(".pdf", ".md");
+        return Files.readString(tempDir.resolve(markdownFileName)).trim();
+    }
+
+    private SemanticParagraph createParagraph(String value) {
+        TextChunk chunk = new TextChunk(value);
+        TextLine line = new TextLine(chunk);
+        TextColumn column = new TextColumn(line);
+        return new SemanticParagraph(new BoundingBox(null, 0, 0, 100, 10), java.util.List.of(column));
+    }
+
+    private SemanticHeading createHeading(String value, int level) {
+        SemanticHeading heading = new SemanticHeading(createParagraph(value));
+        heading.setHeadingLevel(level);
+        return heading;
     }
 }

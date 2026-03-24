@@ -165,7 +165,7 @@ public class TableBorderProcessor {
     static TableBorder normalizeAndProcessTableBorder(List<IObject> rawPageContents, TableBorder tableBorder, int pageNumber) {
         TableBorder normalizedTable = TableStructureNormalizer.normalize(rawPageContents, tableBorder);
         processTableBorderContents(normalizedTable, pageNumber);
-        return normalizedTable;
+        return TableStructureNormalizer.normalizeProcessedClinicalTable(normalizedTable);
     }
 
     private static void processTableBorderContents(TableBorder tableBorder, int pageNumber) {

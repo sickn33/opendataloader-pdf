@@ -40,6 +40,8 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -54,6 +56,13 @@ public class MarkdownGenerator implements Closeable {
     protected boolean embedImages = false;
     protected String imageFormat = Config.IMAGE_FORMAT_PNG;
     protected boolean includeHeaderFooter = false;
+    private static final Pattern CALPROTECTIN_PATTERN = Pattern.compile(
+        "^Calprotectina\\s+(?<matrix>\\S+)\\s+(?<result>[-+]?\\d+(?:[\\.,]\\d+)?)\\s+(?<unit>\\S+)\\s+" +
+            "Adulti\\s+Normale\\s+(?<adultNormal><\\s*\\d+)\\s+Borderline\\s+(?<adultBorderline>\\d+\\s*-\\s*\\d+)\\s+" +
+            "Positivo\\s+(?<adultPositive>>\\s*\\d+)\\s+Neonati\\s+Moderato positivo\\s+(?<neonatalModerate>>\\s*\\d+)\\s+" +
+            "Positivo\\s+(?<neonatalPositive>>\\s*\\d+)$");
+    private static final Pattern NOISE_ONLY_TEXT_PATTERN = Pattern.compile("^(?:[._\\-•·]+(?:\\s+[._\\-•·]+)*)$");
+    private static final Pattern TRAILING_ISOLATED_DOT_PATTERN = Pattern.compile("^(?<content>.+?)\\s+[.]$");
 
     MarkdownGenerator(File inputPdf, Config config) throws IOException {
         String cutPdfFileName = inputPdf.getName();
@@ -74,8 +83,9 @@ public class MarkdownGenerator implements Closeable {
                     if (!isSupportedContent(content)) {
                         continue;
                     }
-                    this.write(content);
-                    writeContentsSeparator();
+                    if (this.write(content)) {
+                        writeContentsSeparator();
+                    }
                 }
             }
 
@@ -111,26 +121,31 @@ public class MarkdownGenerator implements Closeable {
         writeLineBreak();
     }
 
-    protected void write(IObject object) throws IOException {
+    protected boolean write(IObject object) throws IOException {
         if (object instanceof SemanticHeaderOrFooter) {
-            writeHeaderOrFooter((SemanticHeaderOrFooter) object);
+            return writeHeaderOrFooter((SemanticHeaderOrFooter) object);
         } else if (object instanceof SemanticPicture) {
             writePicture((SemanticPicture) object);
+            return true;
         } else if (object instanceof ImageChunk) {
             writeImage((ImageChunk) object);
+            return true;
         } else if (object instanceof SemanticFormula) {
             writeFormula((SemanticFormula) object);
+            return true;
         } else if (object instanceof SemanticHeading) {
-            writeHeading((SemanticHeading) object);
+            return writeHeading((SemanticHeading) object);
         } else if (object instanceof SemanticParagraph) {
-            writeParagraph((SemanticParagraph) object);
+            return writeParagraph((SemanticParagraph) object);
         } else if (object instanceof SemanticTextNode) {
-            writeSemanticTextNode((SemanticTextNode) object);
+            return writeSemanticTextNode((SemanticTextNode) object);
         } else if (object instanceof TableBorder) {
             writeTable((TableBorder) object);
+            return true;
         } else if (object instanceof PDFList) {
-            writeList((PDFList) object);
+            return writeList((PDFList) object);
         }
+        return false;
     }
 
     protected void writeImage(ImageChunk image) {
@@ -213,16 +228,21 @@ public class MarkdownGenerator implements Closeable {
         markdownWriter.write(MarkdownSyntax.MATH_BLOCK_END);
     }
 
-    protected void writeHeaderOrFooter(SemanticHeaderOrFooter headerOrFooter) throws IOException {
+    protected boolean writeHeaderOrFooter(SemanticHeaderOrFooter headerOrFooter) throws IOException {
+        boolean wroteAnyContent = false;
         for (IObject content : headerOrFooter.getContents()) {
             if (isSupportedContent(content)) {
-                write(content);
-                writeContentsSeparator();
+                if (write(content)) {
+                    writeContentsSeparator();
+                    wroteAnyContent = true;
+                }
             }
         }
+        return wroteAnyContent;
     }
 
-    protected void writeList(PDFList list) throws IOException {
+    protected boolean writeList(PDFList list) throws IOException {
+        boolean wroteAnyContent = false;
         for (ListItem item : list.getListItems()) {
             if (!isInsideTable()) {
                 markdownWriter.write(MarkdownSyntax.LIST_ITEM);
@@ -236,11 +256,25 @@ public class MarkdownGenerator implements Closeable {
                 writeLineBreak();
                 writeContents(itemContents, false);
             }
+            wroteAnyContent = true;
         }
+        return wroteAnyContent;
     }
 
-    protected void writeSemanticTextNode(SemanticTextNode textNode) throws IOException {
+    protected boolean writeSemanticTextNode(SemanticTextNode textNode) throws IOException {
+        String value = getRenderableText(textNode);
+        if (value == null) {
+            return false;
+        }
+        markdownWriter.write(getCorrectMarkdownString(value));
+        return true;
+    }
+
+    private String getRenderableText(SemanticTextNode textNode) {
         String value = textNode.getValue();
+        if (value == null) {
+            return null;
+        }
         if (StaticContainers.isKeepLineBreaks()) {
             if (textNode instanceof SemanticHeading) {
                 value = value.replace(MarkdownSyntax.LINE_BREAK, MarkdownSyntax.SPACE);
@@ -251,8 +285,25 @@ public class MarkdownGenerator implements Closeable {
             // Always replace line breaks with space in table cells for proper markdown table formatting
             value = value.replace(MarkdownSyntax.LINE_BREAK, MarkdownSyntax.SPACE);
         }
+        if (!isInsideTable()) {
+            value = normalizeStandaloneText(value);
+        }
+        return value == null || value.isBlank() ? null : value;
+    }
 
-        markdownWriter.write(getCorrectMarkdownString(value));
+    private String normalizeStandaloneText(String value) {
+        String normalized = value.trim();
+        if (normalized.isEmpty() || NOISE_ONLY_TEXT_PATTERN.matcher(normalized).matches()) {
+            return null;
+        }
+        Matcher trailingDotMatcher = TRAILING_ISOLATED_DOT_PATTERN.matcher(normalized);
+        if (trailingDotMatcher.matches()) {
+            normalized = trailingDotMatcher.group("content").trim();
+        }
+        if (normalized.isEmpty() || NOISE_ONLY_TEXT_PATTERN.matcher(normalized).matches()) {
+            return null;
+        }
+        return normalized;
     }
 
     protected void writeTable(TableBorder table) throws IOException {
@@ -303,11 +354,66 @@ public class MarkdownGenerator implements Closeable {
         }
     }
 
-    protected void writeParagraph(SemanticParagraph textNode) throws IOException {
-        writeSemanticTextNode(textNode);
+    protected boolean writeParagraph(SemanticParagraph textNode) throws IOException {
+        if (!isInsideTable()) {
+            ClinicalLegendBlock clinicalLegendBlock = parseClinicalLegendBlock(textNode.getValue());
+            if (clinicalLegendBlock != null) {
+                writeClinicalLegendBlock(clinicalLegendBlock);
+                return true;
+            }
+        }
+        return writeSemanticTextNode(textNode);
     }
 
-    protected void writeHeading(SemanticHeading heading) throws IOException {
+    private ClinicalLegendBlock parseClinicalLegendBlock(String value) {
+        if (value == null) {
+            return null;
+        }
+        Matcher matcher = CALPROTECTIN_PATTERN.matcher(value.trim());
+        if (!matcher.matches()) {
+            return null;
+        }
+        return new ClinicalLegendBlock(
+            "Calprotectina",
+            matcher.group("matrix").trim(),
+            matcher.group("result").trim(),
+            matcher.group("unit").trim(),
+            new String[][]{
+                {"Adulti", "Normale", matcher.group("adultNormal").trim()},
+                {"Adulti", "Borderline", matcher.group("adultBorderline").trim()},
+                {"Adulti", "Positivo", matcher.group("adultPositive").trim()},
+                {"Neonati", "Moderato positivo", matcher.group("neonatalModerate").trim()},
+                {"Neonati", "Positivo", matcher.group("neonatalPositive").trim()}
+            }
+        );
+    }
+
+    private void writeClinicalLegendBlock(ClinicalLegendBlock block) throws IOException {
+        markdownWriter.write("**" + getCorrectMarkdownString(block.name) + "**");
+        writeContentsSeparator();
+        markdownWriter.write("| Matrice | Risultato | U.Misura |");
+        markdownWriter.write(MarkdownSyntax.LINE_BREAK);
+        markdownWriter.write("|---|---|---|");
+        markdownWriter.write(MarkdownSyntax.LINE_BREAK);
+        markdownWriter.write("| " + getCorrectMarkdownString(block.matrix) + " | " +
+            getCorrectMarkdownString(block.result) + " | " + getCorrectMarkdownString(block.unit) + " |");
+        writeContentsSeparator();
+        markdownWriter.write("| Gruppo | Classe | Intervallo |");
+        markdownWriter.write(MarkdownSyntax.LINE_BREAK);
+        markdownWriter.write("|---|---|---|");
+        markdownWriter.write(MarkdownSyntax.LINE_BREAK);
+        for (String[] legendRow : block.legendRows) {
+            markdownWriter.write("| " + getCorrectMarkdownString(legendRow[0]) + " | " +
+                getCorrectMarkdownString(legendRow[1]) + " | " + getCorrectMarkdownString(legendRow[2]) + " |");
+            markdownWriter.write(MarkdownSyntax.LINE_BREAK);
+        }
+    }
+
+    protected boolean writeHeading(SemanticHeading heading) throws IOException {
+        String value = getRenderableText(heading);
+        if (value == null) {
+            return false;
+        }
         if (!isInsideTable()) {
             // Cap heading level to 1-6 per Markdown specification
             int headingLevel = Math.min(6, Math.max(1, heading.getHeadingLevel()));
@@ -316,7 +422,8 @@ public class MarkdownGenerator implements Closeable {
             }
             markdownWriter.write(MarkdownSyntax.SPACE);
         }
-        writeSemanticTextNode(heading);
+        markdownWriter.write(getCorrectMarkdownString(value));
+        return true;
     }
 
     protected void enterTable() {
@@ -360,6 +467,22 @@ public class MarkdownGenerator implements Closeable {
     public void close() throws IOException {
         if (markdownWriter != null) {
             markdownWriter.close();
+        }
+    }
+
+    private static final class ClinicalLegendBlock {
+        private final String name;
+        private final String matrix;
+        private final String result;
+        private final String unit;
+        private final String[][] legendRows;
+
+        private ClinicalLegendBlock(String name, String matrix, String result, String unit, String[][] legendRows) {
+            this.name = name;
+            this.matrix = matrix;
+            this.result = result;
+            this.unit = unit;
+            this.legendRows = legendRows;
         }
     }
 }
